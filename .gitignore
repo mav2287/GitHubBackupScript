@@ -1,0 +1,11 @@
+# Ignore the backup directory where repositories are stored
+github_backup/
+
+# Ignore log files
+*.log
+
+# Ignore temporary SSH files
+*.tmp
+
+# Ignore error logs
+error_log.txt
