@@ -272,8 +272,8 @@ main() {
     check_ssh_auth
     setup_git_ssh_command
 
-    USER_NAME=$(gh api user --jq '.login')
-    if ! gh api user --jq '.login'; then
+    USER_NAME=$(gh api user --jq '.login' 2>/dev/null)
+    if [ -z "$USER_NAME" ]; then
         log_message "Error: Unable to fetch GitHub user details. Exiting."
         cleanup_temp_ssh_config
         exit 1
@@ -285,7 +285,7 @@ main() {
     fetch_repos_with_limit "$USER_NAME" "USER"
 
     # Fetch and backup organization repositories
-    ORG_LIST=$(gh api user/orgs --jq '.[].login')
+    ORG_LIST=$(gh api user/orgs --jq '.[].login' 2>/dev/null)
     for org in $ORG_LIST; do
         fetch_repos_with_limit "$org" "ORG"
     done
