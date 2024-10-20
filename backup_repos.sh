@@ -1,5 +1,30 @@
 #!/bin/bash
 
+# Other Variables
+SILENT=0
+ORPHAN_CLEANUP=0
+MAX_RETRIES=3  # Maximum number of retries for failed operations
+RETRY_DELAY=5  # Delay between retries
+
+# Parse command-line options
+while getopts ":sc" opt; do
+  case $opt in
+    s)
+      SILENT=1
+      ;;
+    c)
+      ORPHAN_CLEANUP=1
+      ;;
+    \?)
+      echo "Invalid option: -$OPTARG" >&2
+      exit 1
+      ;;
+  esac
+done
+
+# Shift parsed options to leave positional arguments
+shift $((OPTIND-1))
+
 # Set default backup directory to the script's parent directory if not passed
 BACKUP_DIR="${1:-$(dirname "$(realpath "$0")")/github_backup}"
 LOG_FILE="${2:-$BACKUP_DIR/backup_log.txt}"
@@ -8,16 +33,9 @@ REPOS_FILE="${BACKUP_DIR}/repos.txt"  # Consolidated repos list
 ORPHAN_LOG="${3:-$BACKUP_DIR/orphaned_repos.txt}"
 SSH_KEY="${4:-}"  # Optionally pass SSH key path, or leave empty to use agent
 
-# Other Variables
-SILENT=0
-ORPHAN_CLEANUP=0
-MAX_RETRIES=3  # Maximum number of retries for failed operations
-RETRY_DELAY=5  # Delay between retries
-
 # Ensure backup, log, and orphan directories exist safely
 ensure_directory_exists() {
-    local dir
-    dir=$1
+    local dir=$1
     if [ ! -d "$dir" ]; then
         mkdir -p "$dir" || { echo "Failed to create directory: $dir" && exit 1; }
     fi
@@ -141,13 +159,12 @@ escape_input() {
 
 # Function to handle cloning/updating repos with duplicate handling and retries
 clone_or_update_repo() {
-    local repo_name repo_url entity_dir retries success repo_path
-    repo_name=$1
-    repo_url=$2
-    entity_dir=$3
-    retries=0
-    success=0
-    repo_path="$entity_dir/$repo_name"
+    local repo_name=$1
+    local repo_url=$2
+    local entity_dir=$3
+    local retries=0
+    local success=0
+    local repo_path="$entity_dir/$repo_name"
 
     # Check if a folder with the same name already exists
     if [ -d "$repo_path" ]; then
@@ -175,26 +192,6 @@ clone_or_update_repo() {
                 success=1
             else
                 log_message "Error fetching branches for $repo_name, retrying..."
-            fi
-
-            # Handle default branch issues
-            local default_branch
-            default_branch=$(get_default_branch "$repo_path")
-            if [ -n "$default_branch" ]; then
-                log_message "Switching to default branch: $default_branch"
-                if ! git -C "$repo_path" checkout "$default_branch"; then
-                    log_error "Failed to switch to branch $default_branch in $repo_name."
-                fi
-            else
-                log_message "No default branch found for $repo_name, skipping updates."
-                break
-            fi
-
-            if [ $success -eq 1 ]; then
-                log_message "Updating $repo_name..."
-                if ! git -C "$repo_path" pull origin "$default_branch"; then
-                    log_message "Error updating $repo_name, retrying..."
-                fi
             fi
         fi
 
