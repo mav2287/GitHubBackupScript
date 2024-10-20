@@ -5,20 +5,15 @@ SILENT=0
 ORPHAN_CLEANUP=0
 MAX_RETRIES=3  # Maximum number of retries for failed operations
 RETRY_DELAY=5  # Delay between retries
+TEMP_KNOWN_HOSTS=$(mktemp)  # Temporary known_hosts file
+SSH_KEY="${4:-}"  # Optionally pass SSH key path, or leave empty to use agent
 
 # Parse command-line options
 while getopts ":sc" opt; do
   case $opt in
-    s)
-      SILENT=1
-      ;;
-    c)
-      ORPHAN_CLEANUP=1
-      ;;
-    \?)
-      echo "Invalid option: -$OPTARG" >&2
-      exit 1
-      ;;
+    s) SILENT=1 ;;
+    c) ORPHAN_CLEANUP=1 ;;
+    \?) echo "Invalid option: -$OPTARG" >&2; exit 1 ;;
   esac
 done
 
@@ -31,7 +26,6 @@ LOG_FILE="${2:-$BACKUP_DIR/backup_log.txt}"
 ERROR_LOG_FILE="${BACKUP_DIR}/error_log.txt"  # New log to track long-term failures
 REPOS_FILE="${BACKUP_DIR}/repos.txt"  # Consolidated repos list
 ORPHAN_LOG="${3:-$BACKUP_DIR/orphaned_repos.txt}"
-SSH_KEY="${4:-}"  # Optionally pass SSH key path, or leave empty to use agent
 
 # Ensure backup, log, and orphan directories exist safely
 ensure_directory_exists() {
@@ -49,7 +43,7 @@ ensure_directory_exists "$(dirname "$ORPHAN_LOG")"
 
 # Function to log messages
 log_message() {
-    if [ $SILENT -eq 0 ]; then
+    if [ "$SILENT" -eq 0 ]; then
         echo "$1"
     fi
     echo "$1" >> "$LOG_FILE"
@@ -73,22 +67,22 @@ check_command "gh"
 check_command "git"
 check_command "ssh-keyscan"
 
-# Function to check SSH key authentication to GitHub, using a temporary known_hosts file
-check_ssh_auth() {
-    log_message "Checking SSH access to GitHub..."
-
-    # Fetch GitHub keys dynamically
+# Fetch GitHub keys once and store them in the temporary known_hosts file
+fetch_github_keys() {
     GITHUB_KEYS=$(ssh-keyscan github.com 2>/dev/null)
     if [ -z "$GITHUB_KEYS" ]; then
         log_message "Error: Could not fetch GitHub keys."
         exit 1
     fi
-
-    # Use a temporary known_hosts file for the check
-    TEMP_KNOWN_HOSTS=$(mktemp)
     echo "$GITHUB_KEYS" > "$TEMP_KNOWN_HOSTS"
+}
 
-    # Perform the SSH check with the temporary known_hosts file
+# Function to test SSH key authentication to GitHub
+check_ssh_auth() {
+    log_message "Checking SSH access to GitHub..."
+
+    fetch_github_keys
+
     if [ -n "$SSH_KEY" ]; then
         ssh -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$TEMP_KNOWN_HOSTS" -i "$SSH_KEY" -T git@github.com &>/dev/null
     else
@@ -97,26 +91,14 @@ check_ssh_auth() {
 
     if [ $? -ne 1 ]; then
         log_message "Error: SSH authentication to GitHub failed. Ensure your SSH key is set up."
-        rm -f "$TEMP_KNOWN_HOSTS"
+        cleanup_temp_ssh_config
         exit 1
     fi
-
-    rm -f "$TEMP_KNOWN_HOSTS"
     log_message "SSH authentication to GitHub successful."
 }
 
-# Function to create a temporary SSH configuration with dynamically fetched GitHub keys
+# Function to set up the GIT_SSH_COMMAND using known_hosts and optional SSH key
 setup_git_ssh_command() {
-    GITHUB_KEYS=$(ssh-keyscan github.com 2>/dev/null)
-
-    if [ -z "$GITHUB_KEYS" ]; then
-        log_message "Error: Could not fetch GitHub keys."
-        exit 1
-    fi
-
-    TEMP_KNOWN_HOSTS=$(mktemp)
-    echo "$GITHUB_KEYS" > "$TEMP_KNOWN_HOSTS"
-
     if [ -n "$SSH_KEY" ]; then
         export GIT_SSH_COMMAND="ssh -o StrictHostKeyChecking=yes -o UserKnownHostsFile=$TEMP_KNOWN_HOSTS -i $SSH_KEY"
     else
@@ -132,15 +114,13 @@ cleanup_temp_ssh_config() {
 
 # Detect the default branch of a repository
 get_default_branch() {
-    local repo_path
-    repo_path=$1
+    local repo_path=$1
     git -C "$repo_path" symbolic-ref refs/remotes/origin/HEAD | sed 's@^refs/remotes/origin/@@'
 }
 
 # Generate a new folder name with DUPLICATE_# suffix if a folder already exists
 generate_duplicate_folder() {
-    local base_path
-    base_path=$1
+    local base_path=$1
     local counter=1
 
     while [ -d "${base_path}_DUPLICATE_${counter}" ]; do
@@ -152,8 +132,7 @@ generate_duplicate_folder() {
 
 # Function to safely escape repo and org/user names to avoid issues
 escape_input() {
-    local input
-    input="$1"
+    local input="$1"
     echo "${input//[^a-zA-Z0-9_-]/_}"
 }
 
@@ -181,30 +160,46 @@ clone_or_update_repo() {
     while [ $retries -lt $MAX_RETRIES ]; do
         if [ ! -d "$repo_path/.git" ]; then
             log_message "Cloning $repo_name into $entity_dir..."
-            if git clone "$repo_url" "$repo_path"; then
-                success=1
+            if [ "$SILENT" -eq 1 ]; then
+                if git clone "$repo_url" "$repo_path" &>/dev/null; then
+                    success=1
+                else
+                    log_message "Error cloning $repo_name, retrying..."
+                fi
             else
-                log_message "Error cloning $repo_name, retrying..."
+                if git clone "$repo_url" "$repo_path"; then
+                    success=1
+                else
+                    log_message "Error cloning $repo_name, retrying..."
+                fi
             fi
         else
             log_message "Fetching all branches for $repo_name..."
-            if git -C "$repo_path" fetch --all; then
-                success=1
+            if [ "$SILENT" -eq 1 ]; then
+                if git -C "$repo_path" fetch --all &>/dev/null; then
+                    success=1
+                else
+                    log_message "Error fetching branches for $repo_name, retrying..."
+                fi
             else
-                log_message "Error fetching branches for $repo_name, retrying..."
+                if git -C "$repo_path" fetch --all; then
+                    success=1
+                else
+                    log_message "Error fetching branches for $repo_name, retrying..."
+                fi
             fi
         fi
 
-        if [ $success -eq 1 ]; then
+        if [ "$success" -eq 1 ]; then
             break
         fi
 
         retries=$((retries + 1))
         log_message "Retrying operation for $repo_name ($retries/$MAX_RETRIES)..."
-        sleep $RETRY_DELAY
+        sleep "$RETRY_DELAY"
     done
 
-    if [ $success -eq 0 ]; then
+    if [ "$success" -eq 0 ]; then
         log_message "Failed to sync repository $repo_name after $MAX_RETRIES attempts."
         log_error "Failed to sync repository $repo_name after $MAX_RETRIES attempts."
         if [ -d "$repo_path" ] && [ ! -d "$repo_path/.git" ]; then
@@ -216,9 +211,8 @@ clone_or_update_repo() {
 
 # Function to fetch and save repos to the repos.txt file
 fetch_repos_with_limit() {
-    local entity entity_type
-    entity=$1
-    entity_type=$2
+    local entity=$1
+    local entity_type=$2
     local total_limit=5000
 
     log_message "Fetching repositories for $entity ($entity_type)..."
@@ -252,7 +246,7 @@ process_repos_from_file() {
 # Function to handle orphaned repositories by renaming them safely
 log_orphaned_repos() {
     log_message "Logging orphaned repositories..."
-    find "$BACKUP_DIR" -mindepth 2 -maxdepth 2 -type d | while read -r dir; do
+    find "$BACKUP_DIR" -mindepth 2 -maxdepth 2 -type d | while IFS= read -r dir; do
         repo_name=$(basename "$dir")
         if ! grep -q "$repo_name" "$REPOS_FILE"; then
             log_message "Orphaned repo detected: $repo_name (renaming)"
@@ -293,7 +287,7 @@ main() {
     # Process all repositories from the consolidated repos.txt file
     process_repos_from_file
 
-    if [ $ORPHAN_CLEANUP -eq 1 ]; then
+    if [ "$ORPHAN_CLEANUP" -eq 1 ]; then
         log_orphaned_repos
     fi
 
