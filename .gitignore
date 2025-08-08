@@ -1,6 +1,12 @@
 # Ignore the backup directory where repositories are stored
 github_backup/
 
+# Ignore backup state (logs, tsvs, orphan logs, etc.)
+backup_state/
+
+# If any FAILED_* dirs are ever created at top-level
+FAILED_*/
+
 # Ignore log files
 *.log
 

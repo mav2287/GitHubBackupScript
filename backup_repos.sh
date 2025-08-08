@@ -10,17 +10,19 @@
 # - Non-destructive: no deletions, no pruning
 # - Safety snapshots: before each fetch, saves refs/remotes/origin/* to refs/paxbackup/<timestamp>/*
 # - Retention: keep last --retain <N> snapshot sets per repo (default 60)
+# - **State/logs are stored in backup_state/ (separate from repo backups)**
 #
 # Usage:
 #   ./backup_repos.sh [-s] [-c] [--no-refresh] [--https] [--owners o1,o2] [--skip o3,o4] [--retain N] [BACKUP_DIR] [LOG_FILE] [ORPHAN_LOG] [SSH_KEY]
 #
 # Defaults:
 #   BACKUP_DIR     = <script_dir>/github_backup
-#   LOG_FILE       = $BACKUP_DIR/backup_log.txt
-#   ERROR_LOG_FILE = $BACKUP_DIR/error_log.txt
-#   REPOS_TSV      = $BACKUP_DIR/repos.tsv            (id<TAB>owner<TAB>name<TAB>ssh_url<TAB>https_url)
-#   MAP_TSV        = $BACKUP_DIR/repo_map.tsv         (id<TAB>abs_path<TAB>owner/name<TAB>remote_url)
-#   ORPHAN_LOG     = $BACKUP_DIR/orphaned_repos.txt
+#   STATE_DIR      = <script_dir>/backup_state
+#   LOG_FILE       = $STATE_DIR/backup_log.txt
+#   ERROR_LOG_FILE = $STATE_DIR/error_log.txt
+#   REPOS_TSV      = $STATE_DIR/repos.tsv            (id<TAB>owner<TAB>name<TAB>ssh_url<TAB>https_url)
+#   MAP_TSV        = $STATE_DIR/repo_map.tsv         (id<TAB>abs_path<TAB>owner/name<TAB>remote_url)
+#   ORPHAN_LOG     = $STATE_DIR/orphaned_repos.txt
 #
 # Requires: gh, git; ssh-keyscan (only if using SSH)
 # Notes: Designed to be non-destructive. No deletes, no --prune. Snapshots are cheap pointers;
@@ -41,6 +43,7 @@ RETRY_DELAY=5
 SNAPSHOT_RETAIN=60         # keep last N snapshot sets per repo
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+STATE_DIR="${SCRIPT_DIR}/backup_state"
 TEMP_KNOWN_HOSTS="$(mktemp)"
 SSH_KEY="${4:-}"  # 4th positional arg if provided
 
@@ -65,11 +68,11 @@ done
 
 # Remaining = positional args
 BACKUP_DIR="${1:-"$SCRIPT_DIR/github_backup"}"
-LOG_FILE="${2:-"$BACKUP_DIR/backup_log.txt"}"
-ERROR_LOG_FILE="${BACKUP_DIR}/error_log.txt"
-REPOS_TSV="${BACKUP_DIR}/repos.tsv"   # id\towner\tname\tssh_url\thttps_url
-MAP_TSV="${BACKUP_DIR}/repo_map.tsv"  # id\tabs_path\towner/name\tremote_url
-ORPHAN_LOG="${3:-"$BACKUP_DIR/orphaned_repos.txt"}"
+LOG_FILE="${2:-"$STATE_DIR/backup_log.txt"}"
+ERROR_LOG_FILE="${STATE_DIR}/error_log.txt"
+REPOS_TSV="${STATE_DIR}/repos.tsv"         # id\towner\tname\tssh_url\thttps_url
+MAP_TSV="${STATE_DIR}/repo_map.tsv"        # id\tabs_path\towner/name\tremote_url
+ORPHAN_LOG="${3:-"$STATE_DIR/orphaned_repos.txt"}"
 
 # ------------------------ Utilities ------------------------
 
@@ -247,7 +250,7 @@ snapshot_remote_refs() {
 
 prune_old_snapshots() {
   local repo="$1" keep="$2"
-  # List all snapshot refs, extract timestamp directory names, unique & sorted desc
+  # List all snapshot refs, extract timestamp dir names, unique & sorted desc
   local tmp_ts="${repo}/.pax_ts.$$"
   git -C "$repo" for-each-ref --format='%(refname)' 'refs/paxbackup/*' 2>/dev/null \
     | awk -F'/' 'NF>=4 {print $3}' | sort -r | awk '!seen[$0]++' > "$tmp_ts"
@@ -257,7 +260,6 @@ prune_old_snapshots() {
     [[ -z "$ts" ]] && continue
     count=$((count+1))
     if (( count > keep )); then
-      # delete all refs under this timestamp
       git -C "$repo" for-each-ref --format='%(refname)' "refs/paxbackup/${ts}/*" \
         | while read -r ref; do
             git -C "$repo" update-ref -d "$ref"
@@ -386,7 +388,7 @@ log_orphans_if_requested() {
   log_message "Scanning for orphans (local repos not present in the refreshed list)..."
   : > "$ORPHAN_LOG"
 
-  local ids_file="${BACKUP_DIR}/.current_ids"
+  local ids_file="${STATE_DIR}/.current_ids"
   awk -F'\t' '{print $1}' "$REPOS_TSV" > "$ids_file"
 
   awk -F'\t' 'NR==FNR {seen[$1]=1; next} { if (!seen[$1]) print $0 }' "$ids_file" "$MAP_TSV" \
@@ -402,6 +404,7 @@ log_orphans_if_requested() {
 
 main() {
   ensure_directory_exists "$BACKUP_DIR"
+  ensure_directory_exists "$STATE_DIR"
   ensure_directory_exists "$(dirname "$LOG_FILE")"
   ensure_directory_exists "$(dirname "$ERROR_LOG_FILE")"
   ensure_directory_exists "$(dirname "$ORPHAN_LOG")"
