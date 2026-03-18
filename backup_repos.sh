@@ -275,8 +275,8 @@ apply_repo_safety_config() {
   git -C "$repo" config fetch.prune false
   git -C "$repo" config gc.auto 0
   git -C "$repo" config gc.pruneExpire never
-  git -C "$repo" config reflogExpire 3650.days
-  git -C "$repo" config reflogExpireUnreachable 3650.days
+  git -C "$repo" config gc.reflogExpire "3650.days"
+  git -C "$repo" config gc.reflogExpireUnreachable "3650.days"
 }
 
 # ------------------------ Clone / Update ------------------------
